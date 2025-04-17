@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+
+# Logging functions
+log_fatal () {
+    rebos api echo fatal "$1"
+}
+
+log_info () {
+    rebos api echo info "$1"
+}
+
+log_success () {
+    rebos api echo success "$1"
+}
+
+log_warning () {
+    rebos api echo warning "$1"
+}
+
+die () {
+    log_fatal "$1"
+    exit 1
+}
+
+# Apply Flatpak override to grant access to user_configs directory
+log_info "Applying Flatpak override to grant access to user_configs directory..."
+flatpak override --user --filesystem=~/.config/rebos/user_configs/
+if [[ $? -eq 0 ]]; then
+    log_success "Flatpak override applied successfully."
+else
+    die "Failed to apply Flatpak override."
+fi
+
+# Set up symbolic links for Flatpak application configurations
+log_info "Setting up symbolic links for Flatpak application configurations..."
+
+# Define zen source and target directories
+source_dir="$HOME/.config/rebos/user_configs/app.zen_browser.zen"
+target_dir="$HOME/.var/app/app.zen_browser.zen"
+
+# Ensure the source directory exists
+if [ -d "$source_dir" ]; then
+    # Check if the target directory already exists
+    if [ -e "$target_dir" ]; then
+        log_warning "Target directory $target_dir already exists. Removing it..."
+        rm -rf "$target_dir" || die "Failed to remove existing target directory."
+    fi
+
+    # Create the parent directory if it doesn't exist
+    mkdir -p "$(dirname "$target_dir")" || die "Failed to create parent directory for $target_dir."
+
+    # Create the symbolic link
+    ln -s "$source_dir" "$target_dir" || die "Failed to create symbolic link from $source_dir to $target_dir."
+
+    log_success "Successfully created symbolic link from $source_dir to $target_dir."
+else
+    log_warning "Source directory $source_dir does not exist. Skipping symbolic link creation."
+fi
+
+# Define sysctl_boot to set sysctl values persistently across reboots
+sysctl_boot() {
+    local setting="$1"
+    echo "$setting" | sudo tee /etc/sysctl.d/99-sysrq.conf > /dev/null
+    sudo sysctl --system > /dev/null 2>&1
+    return $?
+}
+
+if pacman -Qs virt-manager > /dev/null 2>&1; then
+    sudo usermod -aG libvirt $USER
+    sudo usermod -aG kvm $USER
+    sudo usermod -aG video $USER
+
+    sudo systemctl enable libvirtd.service --now
+
+    sudo virsh net-autostart default > /dev/null
+fi
+
+if pacman -Qs auto-cpufreq > /dev/null 2>&1; then
+    sudo systemctl enable auto-cpufreq --now
+fi
+
+if [[ "$(cat /proc/sys/kernel/sysrq)" == "1" ]]; then
+    log_info "SysRQ already enabled..."
+else
+    log_info "Enabling SysRQ..."
+    sysctl_boot "kernel.sysrq = 1" || die "Failed to enable SysRQ! (For Every Boot)"
+    sudo sysctl kernel.sysrq=1 > /dev/null || log_warning "Failed to start SysRQ! (For Just This Session)"
+fi
+
+
+# Check if Fish shell is installed
+if command -v fish >/dev/null 2>&1; then
+    fish_path=$(command -v fish)
+
+    # Add Fish to /etc/shells if it's not already listed
+    if ! grep -Fxq "$fish_path" /etc/shells; then
+        echo "Adding $fish_path to /etc/shells..."
+        echo "$fish_path" | sudo tee -a /etc/shells >/dev/null
+    fi
+
+    # Determine the current default shell for the user
+    current_shell=$(getent passwd "$USER" | cut -d: -f7)
+
+    # Change the default shell to Fish if it's not already set
+    if [ "$current_shell" != "$fish_path" ]; then
+        echo "Changing default shell to $fish_path..."
+        chsh -s "$fish_path"
+    else
+        echo "Fish shell is already the default shell. No changes made."
+    fi
+else
+    echo "Fish shell is not installed. Skipping shell change."
+fi
